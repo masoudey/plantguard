@@ -1,6 +1,6 @@
 # PlantGuard Multimodal Chatbot
 
-PlantGuard is a proof-of-concept multimodal assistant that helps smallholder farmers diagnose foliar plant diseases using image, speech, and text inputs. The project demonstrates the full AI lifecycle required in the assignment brief, from data preparation and model training to deployment, ethics, and reporting.
+PlantGuard is a proof-of-concept multimodal assistant that helps smallholder farmers diagnose foliar plant diseases using image, speech, and text inputs. The project demonstrates the full AI lifecycle from data preparation and model training to deployment, ethics, and reporting.
 
 ## Repository Layout
 ```
@@ -38,7 +38,17 @@ plantguard/
 6. **Train core models**
    - Vision: `python scripts/train_vision.py --data-dir data/processed/plantvillage --epochs 15 --batch-size 32`
    - Audio:  `python scripts/train_audio.py --data-dir data/processed/audio --epochs 20 --batch-size 32`
-   - Text (fast dev run): `python scripts/train_text.py --data-dir data/processed/faq --model distilbert-base-uncased --epochs 1 --batch-size 8 --max-length 256 --doc-stride 64 --sample-size 2000`
+  - Text (fast dev run):
+    ```bash
+    .venv/bin/python scripts/train_text.py \
+      --data-dir data/processed/faq \
+      --model distilbert-base-uncased \
+      --epochs 1 \
+      --batch-size 8 \
+      --max-length 256 \
+      --doc-stride 64 \
+      --sample-size 2000
+    ```
 7. **Build the LangChain FAISS knowledge base**  
    `python scripts/build_vector_store.py --input data/knowledge_base --output models/text/knowledge_base`
 8. **Optional: train multimodal fusion** once you have aligned feature packs  
@@ -108,7 +118,7 @@ Rebuild the containers (`docker compose -f docker/docker-compose.yml up --build`
 - The backend container runs `uvicorn` on `http://localhost:8000`. The frontend container serves the built React/Tailwind app via Nginx on `http://localhost:3000`.
 - During development you can still run `npm run dev` locally for hot reloading if desired.
 
-## Assignment Mapping
+##  Mapping
 - **Environment Setup**: `pyproject.toml`, Docker assets, Makefile, and `frontend/package.json` document the environment configuration.
 - **Data Exploration**: See notebooks in `notebooks/` and dataset utilities in `scripts/download_data.py`.
 - **Preprocessing Pipelines**: Located under `src/backend/services/preprocess.py` with modality-specific helpers.
