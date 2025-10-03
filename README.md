@@ -76,7 +76,14 @@ Each modality ships with a training script under `scripts/` and expects pre-proc
   1. Supply `data/processed/faq/train.json` (and optionally `validation.json`) in SQuAD-style format.
   2. Fine-tune the head with:
      ```bash
-     python scripts/train_text.py --data-dir data/processed/faq --epochs 3 --batch-size 8
+     .venv/bin/python scripts/train_text.py \
+       --data-dir data/processed/faq \
+       --model bert-base-uncased \
+       --epochs 3 \
+       --batch-size 16 \
+       --max-length 384 \
+       --doc-stride 128 \
+       --sample-size 20000
      ```
      Outputs land in `models/text/plantguard_qa_head/` alongside the tokenizer.
 
