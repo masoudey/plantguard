@@ -23,7 +23,6 @@ async def answer_question(payload: dict) -> dict:
         raise HTTPException(status_code=400, detail="Question must not be empty")
 
     retriever = models.get_retriever()
-    qa = qa_pipeline.get_qa_pipeline()
 
     candidate_contexts: List[Dict[str, Any]] = []
 
@@ -73,8 +72,8 @@ async def answer_question(payload: dict) -> dict:
 
     for context_item in candidate_contexts:
         context_text = context_item["text"]
-        response = qa({"question": question, "context": context_text})
-        score = float(response.get("score") or 0.0)
+        response = qa_pipeline.answer_question(question, context_text)
+        score = float(response.get("confidence") or 0.0)
         if score >= best_answer["confidence"]:
             best_answer = {
                 "answer": response.get("answer", ""),
