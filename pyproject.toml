@@ -1,0 +1,53 @@
+[project]
+name = "plantguard"
+version = "0.1.0"
+description = "Multimodal chatbot for plant disease diagnosis"
+authors = [{ name = "Your Name" }]
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "fastapi",
+  "uvicorn[standard]",
+  "torch",
+  "torchvision",
+  "torchaudio",
+  "transformers",
+  "faiss-cpu",
+  "sentence-transformers",
+  "langchain-text-splitters",
+  "langchain-community",
+  "langchain-core",
+  "librosa",
+  "opencv-python",
+  "pydantic",
+  "pydantic-settings",
+  "python-dotenv",
+  "SpeechRecognition",
+  "scikit-learn",
+  "numpy",
+  "pandas",
+  "matplotlib",
+  "seaborn",
+  "datasets",
+  "tensorboard",
+  "loguru",
+  "python-multipart",
+  "requests",
+  "soundfile",
+  "jinja2",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest",
+  "pytest-asyncio",
+  "httpx",
+  "ruff",
+  "mypy",
+  "black",
+  "isort",
+  "types-requests",
+]
+
+[tool.setuptools]
+packages = ["plantguard"]
