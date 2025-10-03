@@ -5,9 +5,7 @@ __pycache__/
 *.env
 .env
 logs/
-models/
 checkpoints/
-data/
 .DS_Store
 reports/*.pdf
 reports/*.docx
