@@ -2,17 +2,17 @@
 from __future__ import annotations
 
 import argparse
-import sys
 import json
+import sys
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import torch
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, Subset, WeightedRandomSampler, random_split
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -21,9 +21,24 @@ except Exception:  # pragma: no cover - optional dependency
 
 import numpy as np
 
+try:
+    from tqdm.auto import tqdm
+except Exception:  # pragma: no cover - tqdm optional
+    tqdm = None  # type: ignore
+
 from src.backend.services.audio.dataset import SymptomSpeechDataset
 from src.backend.services.audio.model import AudioClassifier
 from src.backend.utils import logger
+
+
+def _parse_conv_channels(value: str) -> List[int]:
+    parts = [chunk.strip() for chunk in value.split(",") if chunk.strip()]
+    if not parts:
+        raise argparse.ArgumentTypeError("--conv-channels must contain at least one integer")
+    try:
+        return [int(chunk) for chunk in parts]
+    except ValueError as exc:  # pragma: no cover - input validation
+        raise argparse.ArgumentTypeError("--conv-channels expects a comma-separated list of integers") from exc
 
 
 def parse_args() -> argparse.Namespace:
@@ -36,34 +51,76 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--val-split", type=float, default=0.1, help="Fraction of training data used for validation if val manifest missing")
     parser.add_argument("--num-workers", type=int, default=2, help="Dataloader workers")
     parser.add_argument("--pad-to", type=int, default=200, help="Number of frames to pad MFCC features to")
+    parser.add_argument("--n-mfcc", type=int, default=40, help="Number of MFCC coefficients to compute")
+    parser.add_argument("--augment", action="store_true", help="Enable on-the-fly waveform augmentation for training data")
+    parser.add_argument("--augment-prob", type=float, default=0.5, help="Probability of applying augmentation to an example")
+    parser.add_argument("--class-weighting", action="store_true", help="Apply class-balanced loss weights derived from training manifest")
+    parser.add_argument("--use-weighted-sampler", action="store_true", help="Enable WeightedRandomSampler to rebalance batches")
+    parser.add_argument("--conv-channels", default="32,64", help="Comma-separated convolution channel sizes (e.g., 32,64,128)")
+    parser.add_argument("--hidden-size", type=int, default=128, help="Hidden size for LSTM layers")
+    parser.add_argument("--lstm-layers", type=int, default=2, help="Number of LSTM layers")
+    parser.add_argument("--no-bidirectional", action="store_true", help="Disable bidirectional LSTM")
+    parser.add_argument("--dropout", type=float, default=0.3, help="Dropout probability applied after LSTM")
+    parser.add_argument("--log-batches", type=int, default=0, help="Log every N training batches (set 0 to disable)")
+    parser.add_argument("--progress", action="store_true", help="Display tqdm progress bars during training")
     parser.add_argument("--log-dir", default=None, help="Optional TensorBoard log directory")
     parser.add_argument("--metrics-output", default=None, help="Optional JSON file to write best validation metrics")
     return parser.parse_args()
 
 
-def build_dataloaders(args: argparse.Namespace) -> Tuple[DataLoader, DataLoader, List[str]]:
-    base_train = SymptomSpeechDataset(root=args.data_dir, split="train", pad_to=args.pad_to)
+def build_dataloaders(
+    args: argparse.Namespace,
+) -> Tuple[DataLoader, DataLoader, List[str], Optional[SymptomSpeechDataset]]:
     val_manifest = Path(args.data_dir) / "val.json"
 
+    weighted_sampler: Optional[WeightedRandomSampler] = None
+    train_manifest_dataset: Optional[SymptomSpeechDataset] = None
+
     if val_manifest.exists():
-        train_dataset = base_train
+        train_dataset = SymptomSpeechDataset(
+            root=args.data_dir,
+            split="train",
+            pad_to=args.pad_to,
+            augment=args.augment,
+            augment_prob=args.augment_prob,
+            n_mfcc=args.n_mfcc,
+        )
         val_dataset = SymptomSpeechDataset(
             root=args.data_dir,
             split="val",
             pad_to=args.pad_to,
-            label_to_index=base_train.label_to_index,
+            label_to_index=train_dataset.label_to_index,
+            augment=False,
+            n_mfcc=args.n_mfcc,
         )
-    else:
-        val_len = max(1, int(len(base_train) * args.val_split))
-        train_len = len(base_train) - val_len
-        train_dataset, val_dataset = random_split(base_train, [train_len, val_len])
+        train_manifest_dataset = train_dataset
 
-    class_names = [name for name, _ in sorted(base_train.label_to_index.items(), key=lambda x: x[1])]
+        if args.use_weighted_sampler:
+            sample_weights = train_dataset.sample_weights()
+            weighted_sampler = WeightedRandomSampler(sample_weights, num_samples=len(sample_weights), replacement=True)
+    else:
+        base_dataset = SymptomSpeechDataset(
+            root=args.data_dir,
+            split="train",
+            pad_to=args.pad_to,
+            augment=False,
+            n_mfcc=args.n_mfcc,
+        )
+        val_len = max(1, int(len(base_dataset) * args.val_split))
+        train_len = len(base_dataset) - val_len
+        train_dataset, val_dataset = random_split(base_dataset, [train_len, val_len])
+
+    if isinstance(train_dataset, Subset):
+        base_dataset = train_dataset.dataset  # type: ignore[attr-defined]
+        class_names = base_dataset.class_names  # type: ignore[has-type]
+    else:
+        class_names = train_dataset.class_names
 
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
-        shuffle=True,
+        shuffle=weighted_sampler is None,
+        sampler=weighted_sampler,
         num_workers=args.num_workers,
         pin_memory=True,
     )
@@ -75,20 +132,51 @@ def build_dataloaders(args: argparse.Namespace) -> Tuple[DataLoader, DataLoader,
         pin_memory=True,
     )
 
-    return train_loader, val_loader, class_names
+    return train_loader, val_loader, class_names, train_manifest_dataset
 
 
 def train() -> None:
     args = parse_args()
+    args.conv_channels = _parse_conv_channels(args.conv_channels)
     log = logger.get_logger(__name__)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     log.info("Using device", device=str(device))
 
-    train_loader, val_loader, class_names = build_dataloaders(args)
+    if args.progress and tqdm is None:
+        log.warning("tqdm is not installed; install tqdm or omit --progress to disable progress bars")
+
+    train_loader, val_loader, class_names, train_manifest_dataset = build_dataloaders(args)
     num_classes = len(class_names)
 
-    model = AudioClassifier(device=device, num_classes=num_classes, class_names=class_names)
-    criterion = torch.nn.CrossEntropyLoss()
+    arch = {
+        "conv_channels": tuple(args.conv_channels),
+        "lstm_hidden": args.hidden_size,
+        "lstm_layers": args.lstm_layers,
+        "bidirectional": not args.no_bidirectional,
+        "dropout": args.dropout,
+        "n_mfcc": args.n_mfcc,
+    }
+
+    model = AudioClassifier(
+        device=device,
+        num_classes=num_classes,
+        class_names=class_names,
+        conv_channels=arch["conv_channels"],
+        lstm_hidden=args.hidden_size,
+        lstm_layers=args.lstm_layers,
+        bidirectional=not args.no_bidirectional,
+        dropout=args.dropout,
+        n_mfcc=args.n_mfcc,
+    )
+
+    class_weights_tensor = None
+    if args.class_weighting and train_manifest_dataset is not None:
+        counts = train_manifest_dataset.label_counts
+        total = sum(counts.values())
+        weights = [total / (counts[name] * len(counts)) for name in class_names]
+        class_weights_tensor = torch.tensor(weights, dtype=torch.float32, device=device)
+
+    criterion = torch.nn.CrossEntropyLoss(weight=class_weights_tensor)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.5, patience=2)
 
@@ -104,7 +192,12 @@ def train() -> None:
     for epoch in range(1, args.epochs + 1):
         model.train()
         running_loss = 0.0
-        for features, labels in train_loader:
+        if args.progress and tqdm is not None:
+            batch_iterator = tqdm(train_loader, desc=f"Epoch {epoch}", unit="batch", leave=False)
+        else:
+            batch_iterator = train_loader
+
+        for batch_idx, (features, labels) in enumerate(batch_iterator, 1):
             features = features.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
 
@@ -116,6 +209,21 @@ def train() -> None:
             optimizer.step()
 
             running_loss += loss.item() * features.size(0)
+
+            if args.progress and tqdm is not None:
+                batch_iterator.set_postfix(loss=float(loss.item()))
+            elif args.log_batches and batch_idx % args.log_batches == 0:
+                total_batches = len(train_loader)
+                log.info(
+                    "Batch progress",
+                    epoch=epoch,
+                    batch=batch_idx,
+                    total_batches=total_batches,
+                    loss=round(float(loss.item()), 4),
+                )
+
+        if args.progress and tqdm is not None:
+            batch_iterator.close()
 
         train_loss = running_loss / len(train_loader.dataset)
         val_loss, metrics = evaluate(model, val_loader, criterion, device, class_names)
@@ -141,12 +249,16 @@ def train() -> None:
         if macro_f1 > best_macro_f1:
             best_macro_f1 = macro_f1
             best_metrics = metrics
-            torch.save({
-                "state_dict": model.state_dict(),
-                "class_names": class_names,
-                "pad_to": args.pad_to,
-                "metrics": metrics,
-            }, output_path)
+            torch.save(
+                {
+                    "state_dict": model.state_dict(),
+                    "class_names": class_names,
+                    "pad_to": args.pad_to,
+                    "metrics": metrics,
+                    "arch": arch,
+                },
+                output_path,
+            )
             log.info(
                 "Saved new best audio checkpoint",
                 path=str(output_path),

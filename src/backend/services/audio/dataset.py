@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import random
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -33,10 +35,17 @@ class SymptomSpeechDataset(Dataset[Tuple[torch.Tensor, int]]):
         split: str = "train",
         pad_to: int = 200,
         label_to_index: Dict[str, int] | None = None,
+        *,
+        augment: bool = False,
+        augment_prob: float = 0.4,
+        n_mfcc: int = 40,
     ) -> None:
         self.root = Path(root)
         self.split = split
         self.pad_to = pad_to
+        self.augment = augment
+        self.augment_prob = augment_prob
+        self.n_mfcc = n_mfcc
 
         manifest = self.root / f"{split}.json"
         if not manifest.exists():
@@ -51,10 +60,12 @@ class SymptomSpeechDataset(Dataset[Tuple[torch.Tensor, int]]):
             self.label_to_index = {name: idx for idx, name in enumerate(labels)}
         else:
             self.label_to_index = label_to_index
+        self._index_to_label = [name for name, _ in sorted(self.label_to_index.items(), key=lambda x: x[1])]
         self.samples = [
             AudioSample(file_path=self.root / item["file"], label=self.label_to_index[item["label"]])
             for item in entries
         ]
+        self._label_counts = Counter([item["label"] for item in entries])
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -64,15 +75,31 @@ class SymptomSpeechDataset(Dataset[Tuple[torch.Tensor, int]]):
         if not sample.file_path.exists():
             raise FileNotFoundError(f"Audio file '{sample.file_path}' not found")
 
-        mfcc = features.mfcc_from_file(sample.file_path)
+        waveform, sr = features.load_waveform(sample.file_path)
+        if self.augment and random.random() < self.augment_prob:
+            waveform = features.apply_augmentations(waveform, sr)
+
+        mfcc = features.mfcc_from_waveform(waveform, sr=sr, n_mfcc=self.n_mfcc)
         mfcc = features.pad_features(mfcc, max_length=self.pad_to)
         tensor = torch.from_numpy(np.expand_dims(mfcc, axis=0)).float()
         return tensor, sample.label
 
     @property
     def class_names(self) -> List[str]:
-        return [name for name, _ in sorted(self.label_to_index.items(), key=lambda x: x[1])]
+        return list(self._index_to_label)
 
     @property
     def num_classes(self) -> int:
         return len(self.label_to_index)
+
+    @property
+    def label_counts(self) -> Dict[str, int]:
+        return dict(self._label_counts)
+
+    def sample_weights(self) -> List[float]:
+        counts = self.label_counts
+        weights = []
+        for sample in self.samples:
+            label_name = self._index_to_label[sample.label]
+            weights.append(1.0 / counts[label_name])
+        return weights
