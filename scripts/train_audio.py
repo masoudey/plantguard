@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import argparse
 import sys
+import json
 from pathlib import Path
-from typing import Tuple
+from typing import Dict, List, Tuple
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -12,6 +13,13 @@ if str(ROOT) not in sys.path:
 
 import torch
 from torch.utils.data import DataLoader, random_split
+
+try:
+    from torch.utils.tensorboard import SummaryWriter
+except Exception:  # pragma: no cover - optional dependency
+    SummaryWriter = None  # type: ignore
+
+import numpy as np
 
 from src.backend.services.audio.dataset import SymptomSpeechDataset
 from src.backend.services.audio.model import AudioClassifier
@@ -28,10 +36,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--val-split", type=float, default=0.1, help="Fraction of training data used for validation if val manifest missing")
     parser.add_argument("--num-workers", type=int, default=2, help="Dataloader workers")
     parser.add_argument("--pad-to", type=int, default=200, help="Number of frames to pad MFCC features to")
+    parser.add_argument("--log-dir", default=None, help="Optional TensorBoard log directory")
+    parser.add_argument("--metrics-output", default=None, help="Optional JSON file to write best validation metrics")
     return parser.parse_args()
 
 
-def build_dataloaders(args: argparse.Namespace) -> Tuple[DataLoader, DataLoader, list[str]]:
+def build_dataloaders(args: argparse.Namespace) -> Tuple[DataLoader, DataLoader, List[str]]:
     base_train = SymptomSpeechDataset(root=args.data_dir, split="train", pad_to=args.pad_to)
     val_manifest = Path(args.data_dir) / "val.json"
 
@@ -82,7 +92,12 @@ def train() -> None:
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.5, patience=2)
 
-    best_acc = 0.0
+    writer: SummaryWriter | None = None
+    if args.log_dir and SummaryWriter is not None:
+        writer = SummaryWriter(args.log_dir)
+
+    best_macro_f1 = -1.0
+    best_metrics: Dict[str, object] = {}
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -103,7 +118,9 @@ def train() -> None:
             running_loss += loss.item() * features.size(0)
 
         train_loss = running_loss / len(train_loader.dataset)
-        val_loss, val_acc = evaluate(model, val_loader, criterion, device)
+        val_loss, metrics = evaluate(model, val_loader, criterion, device, class_names)
+        val_acc = metrics["accuracy"]
+        macro_f1 = metrics["macro_f1"]
         scheduler.step(val_loss)
 
         log.info(
@@ -112,26 +129,61 @@ def train() -> None:
             train_loss=round(train_loss, 4),
             val_loss=round(val_loss, 4),
             val_acc=round(val_acc, 4),
+            macro_f1=round(macro_f1, 4),
         )
 
-        if val_acc > best_acc:
-            best_acc = val_acc
+        if writer:
+            writer.add_scalar("Loss/train", train_loss, epoch)
+            writer.add_scalar("Loss/val", val_loss, epoch)
+            writer.add_scalar("Metrics/val_accuracy", val_acc, epoch)
+            writer.add_scalar("Metrics/val_macro_f1", macro_f1, epoch)
+
+        if macro_f1 > best_macro_f1:
+            best_macro_f1 = macro_f1
+            best_metrics = metrics
             torch.save({
                 "state_dict": model.state_dict(),
                 "class_names": class_names,
                 "pad_to": args.pad_to,
+                "metrics": metrics,
             }, output_path)
-            log.info("Saved new best audio checkpoint", path=str(output_path), accuracy=round(best_acc, 4))
+            log.info(
+                "Saved new best audio checkpoint",
+                path=str(output_path),
+                accuracy=round(val_acc, 4),
+                macro_f1=round(macro_f1, 4),
+            )
 
-    log.info("Audio training complete", best_accuracy=round(best_acc, 4))
+    if writer:
+        writer.close()
+
+    if args.metrics_output and best_metrics:
+        metrics_path = Path(args.metrics_output)
+        metrics_path.parent.mkdir(parents=True, exist_ok=True)
+        with metrics_path.open("w") as fh:
+            json.dump(best_metrics, fh, indent=2)
+        log.info("Wrote best metrics", path=str(metrics_path))
+
+    log.info(
+        "Audio training complete",
+        best_macro_f1=round(best_macro_f1, 4) if best_macro_f1 >= 0 else None,
+    )
 
 
 @torch.no_grad()
-def evaluate(model: AudioClassifier, loader: DataLoader, criterion, device: torch.device) -> Tuple[float, float]:
+def evaluate(
+    model: AudioClassifier,
+    loader: DataLoader,
+    criterion,
+    device: torch.device,
+    class_names: List[str],
+) -> Tuple[float, Dict[str, object]]:
     model.eval()
     total_loss = 0.0
     total_correct = 0
     total_samples = 0
+    all_preds: List[int] = []
+    all_labels: List[int] = []
 
     for features, labels in loader:
         features = features.to(device, non_blocking=True)
@@ -143,10 +195,42 @@ def evaluate(model: AudioClassifier, loader: DataLoader, criterion, device: torc
         preds = logits.argmax(dim=1)
         total_correct += (preds == labels).sum().item()
         total_samples += features.size(0)
+        all_preds.extend(preds.cpu().tolist())
+        all_labels.extend(labels.cpu().tolist())
 
     avg_loss = total_loss / max(total_samples, 1)
     accuracy = total_correct / max(total_samples, 1)
-    return avg_loss, accuracy
+
+    metrics: Dict[str, object] = {
+        "accuracy": float(accuracy),
+        "macro_f1": 0.0,
+        "per_class": {},
+    }
+
+    if total_samples:
+        preds_arr = np.array(all_preds)
+        labels_arr = np.array(all_labels)
+        per_class: Dict[str, Dict[str, float]] = {}
+        f1_total = 0.0
+        for idx, name in enumerate(class_names):
+            tp = float(np.sum((preds_arr == idx) & (labels_arr == idx)))
+            fp = float(np.sum((preds_arr == idx) & (labels_arr != idx)))
+            fn = float(np.sum((preds_arr != idx) & (labels_arr == idx)))
+            precision = tp / (tp + fp) if (tp + fp) else 0.0
+            recall = tp / (tp + fn) if (tp + fn) else 0.0
+            f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) else 0.0
+            support = int(np.sum(labels_arr == idx))
+            per_class[name] = {
+                "precision": float(precision),
+                "recall": float(recall),
+                "f1": float(f1),
+                "support": support,
+            }
+            f1_total += f1
+        metrics["per_class"] = per_class
+        metrics["macro_f1"] = float(f1_total / max(len(class_names), 1))
+
+    return avg_loss, metrics
 
 
 if __name__ == "__main__":

@@ -32,12 +32,21 @@ plantguard/
    `cp .env.example .env` and fill in any optional API keys.
 5. **Prepare datasets**
    - Vision: extract PlantVillage into `data/raw/plantvillage/extracted/` and run `python scripts/prepare_plantvillage.py --raw-dir data/raw/plantvillage/extracted --output data/processed/plantvillage`.
-   - Audio: place WAV files under `data/processed/audio/<split>/...` and create `train.json` / `val.json` manifests describing file paths and labels.
+   - Audio: follow the [Audio Dataset Generation](#audio-dataset-generation) workflow to script symptom sentences, synthesize WAV clips, and emit `train.json` / `val.json` manifests.
    - FAQ: add SQuAD-style `train.json` (and optional `validation.json`) to `data/processed/faq/`.
    - Knowledge base: store agronomy notes in `data/knowledge_base/` (`.txt`, `.md`, or JSON Q&A pairs`).
 6. **Train core models**
    - Vision: `python scripts/train_vision.py --data-dir data/processed/plantvillage --epochs 15 --batch-size 32`
-   - Audio:  `python scripts/train_audio.py --data-dir data/processed/audio --epochs 20 --batch-size 32`
+   - Audio:
+     ```bash
+     python scripts/train_audio.py \
+       --data-dir data/processed/audio \
+       --epochs 20 \
+       --batch-size 32 \
+       --num-workers 0 \
+       --log-dir runs/audio \
+       --metrics-output reports/audio_best.json
+     ```
   - Text (fast dev run):
     ```bash
     .venv/bin/python scripts/train_text.py \
@@ -54,9 +63,40 @@ plantguard/
 8. **Optional: train multimodal fusion** once you have aligned feature packs  
    `python scripts/train_fusion.py --train data/processed/fusion/train.pt --val data/processed/fusion/val.pt`
 9. **Run the application**
-   - Backend only: `uvicorn plantguard.src.backend.main:app --reload`
-   - Frontend dev server: `cd frontend && npm install && npm run dev`
-   - Docker (backend + frontend): `docker compose -f docker/docker-compose.yml up --build`
+ - Backend only: `uvicorn plantguard.src.backend.main:app --reload`
+  - Frontend dev server: `cd frontend && npm install && npm run dev`
+  - Docker (backend + frontend): `docker compose -f docker/docker-compose.yml up --build`
+
+## Audio Dataset Generation
+- **Draft symptom narratives**: Populate `plantguard/data/audio/Expanded_Plant_Symptom_TTS_Manifest.csv` with concise field observations (`text`), target class labels (`label`), and explicit output paths such as `train/powdery_mildew/powdery_mildew_001.wav` or `val/powdery_mildew/powdery_mildew_val_001.wav`. Include per-row voice/language overrides if you want accented variants.
+- **Synthesize speech clips**:
+  ```bash
+  python plantguard/scripts/generate_audio_from_csv.py \
+    --csv plantguard/data/audio/Expanded_Plant_Symptom_TTS_Manifest.csv \
+    --output-dir plantguard/data/processed/audio \
+    --mono
+  ```
+  The helper writes 16 kHz mono WAVs beneath `data/processed/audio/<split>/<label>/` and mirrors the rel paths defined in the CSV.
+- **Regenerate manifests**: After audio export, rebuild manifests so the trainer has balanced metadata.
+  ```bash
+  python - <<'PY'
+from pathlib import Path
+import json
+
+root = Path('data/processed/audio')
+for split in ['train', 'val']:
+    base = root / split
+    if not base.exists():
+        continue
+    records = [
+        {"file": str(path.relative_to(root)), "label": path.parent.name}
+        for path in base.rglob('*.wav')
+    ]
+    (root / f'{split}.json').write_text(json.dumps(records, indent=2))
+    print(f"Wrote {split}.json with {len(records)} items")
+PY
+  ```
+- **Iterate for coverage**: Repeat the draft → synthesize → manifest loop until each label has ample train/val clips. Mix phrasing, speech rates, and voices to improve generalisation.
 
 ## Model Training
 Each modality ships with a training script under `scripts/` and expects pre-processed data in `data/processed/`.
@@ -75,12 +115,18 @@ Each modality ships with a training script under `scripts/` and expects pre-proc
      The script writes `models/vision/plantguard_resnet50.pt`, embedding the class names for inference.
 
 - **Audio (CNN-LSTM on MFCCs)**
-  1. Create manifest files `data/processed/audio/train.json` (and optionally `val.json`) containing records such as `{"file": "train/clip_001.wav", "label": "powdery_mildew"}`. Paths are resolved relative to `data/processed/audio`.
-  2. Launch training:
+  1. Confirm `data/processed/audio/train/<label>/` and `val/<label>/` mirror the rel paths defined in the CSV/manifests generated earlier.
+  2. Launch training (set `--num-workers 0` on macOS/MPS hosts to avoid multiprocessing import issues):
      ```bash
-     python scripts/train_audio.py --data-dir data/processed/audio --epochs 20 --batch-size 32
+     python scripts/train_audio.py \
+       --data-dir data/processed/audio \
+       --epochs 20 \
+       --batch-size 32 \
+       --num-workers 0 \
+       --log-dir runs/audio \
+       --metrics-output reports/audio_best.json
      ```
-     The checkpoint `models/audio/plantguard_cnn_lstm.pt` stores learned weights, label order, and MFCC padding length used at inference time.
+     The trainer logs loss/accuracy/macro-F1 (TensorBoard when available), persists per-class precision/recall curves in `reports/audio_best.json`, and saves the best checkpoint with label metadata to `models/audio/plantguard_cnn_lstm.pt`.
 
 - **Text QA (BERT fine-tuning)**
   1. Supply `data/processed/faq/train.json` (and optionally `validation.json`) in SQuAD-style format.
