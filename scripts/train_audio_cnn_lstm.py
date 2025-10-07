@@ -1,9 +1,8 @@
-"""Train the audio modality using a transformer-based classifier."""
+"""Train the PlantGuard speech classifier using MFCC features."""
 from __future__ import annotations
 
 import argparse
 import json
-import math
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -20,51 +19,48 @@ try:
 except Exception:  # pragma: no cover - optional dependency
     SummaryWriter = None  # type: ignore
 
-try:
-    from tqdm.auto import tqdm
-except Exception:  # pragma: no cover - optional dependency
-    tqdm = None  # type: ignore
-
 import numpy as np
 
+try:
+    from tqdm.auto import tqdm
+except Exception:  # pragma: no cover - tqdm optional
+    tqdm = None  # type: ignore
+
 from src.backend.services.audio.dataset import SymptomSpeechDataset
-from src.backend.services.audio.model import AudioTransformerClassifier
+from src.backend.services.audio.model_cnn_lstm import AudioClassifier
 from src.backend.utils import logger
 
 
-def _parse_channels(value: str) -> Tuple[int, int]:
+def _parse_conv_channels(value: str) -> List[int]:
     parts = [chunk.strip() for chunk in value.split(",") if chunk.strip()]
-    if len(parts) != 2:
-        raise argparse.ArgumentTypeError("--conv-channels expects two comma-separated integers")
+    if not parts:
+        raise argparse.ArgumentTypeError("--conv-channels must contain at least one integer")
     try:
-        return tuple(int(p) for p in parts)
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError("--conv-channels expects integers") from exc
+        return [int(chunk) for chunk in parts]
+    except ValueError as exc:  # pragma: no cover - input validation
+        raise argparse.ArgumentTypeError("--conv-channels expects a comma-separated list of integers") from exc
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train the audio modality classifier (transformer variant)")
+    parser = argparse.ArgumentParser(description="Train the audio modality classifier")
     parser.add_argument("--data-dir", default="data/processed/audio", help="Directory containing <split>.json manifests and audio files")
-    parser.add_argument("--output", default="models/audio/plantguard_transformer.pt", help="Path to save trained weights")
+    parser.add_argument("--output", default="models/audio/plantguard_cnn_lstm.pt", help="Path to save trained weights")
     parser.add_argument("--epochs", type=int, default=15, help="Training epochs")
-    parser.add_argument("--batch-size", type=int, default=32, help="Mini-batch size")
-    parser.add_argument("--learning-rate", type=float, default=3e-4, help="Learning rate")
+    parser.add_argument("--batch-size", type=int, default=16, help="Mini-batch size")
+    parser.add_argument("--learning-rate", type=float, default=1e-3, help="Learning rate")
     parser.add_argument("--val-split", type=float, default=0.1, help="Fraction of training data used for validation if val manifest missing")
     parser.add_argument("--num-workers", type=int, default=2, help="Dataloader workers")
-    parser.add_argument("--sample-rate", type=int, default=16000, help="Target sample rate for waveforms")
-    parser.add_argument("--max-duration", type=float, default=6.0, help="Max clip duration in seconds")
-    parser.add_argument("--n-mels", type=int, default=64, help="Number of mel bins")
-    parser.add_argument("--n-fft", type=int, default=1024, help="FFT window length")
-    parser.add_argument("--hop-length", type=int, default=256, help="Hop length for the spectrogram")
-    parser.add_argument("--embed-dim", type=int, default=256, help="Transformer embedding dimension")
-    parser.add_argument("--num-heads", type=int, default=4, help="Number of attention heads")
-    parser.add_argument("--num-layers", type=int, default=4, help="Transformer encoder layers")
-    parser.add_argument("--ffn-dim", type=int, default=512, help="Feedforward dimension inside transformer")
-    parser.add_argument("--dropout", type=float, default=0.2, help="Dropout probability")
-    parser.add_argument("--augment", action="store_true", help="Enable waveform augmentation")
-    parser.add_argument("--augment-prob", type=float, default=0.2, help="Probability of applying augmentation")
+    parser.add_argument("--pad-to", type=int, default=200, help="Number of frames to pad MFCC features to")
+    parser.add_argument("--n-mfcc", type=int, default=40, help="Number of MFCC coefficients to compute")
+    parser.add_argument("--augment", action="store_true", help="Enable on-the-fly waveform augmentation for training data")
+    parser.add_argument("--augment-prob", type=float, default=0.3, help="Probability of applying augmentation to an example")
     parser.add_argument("--class-weighting", action="store_true", help="Apply class-balanced loss weights derived from training manifest")
     parser.add_argument("--use-weighted-sampler", action="store_true", help="Enable WeightedRandomSampler to rebalance batches")
+    parser.add_argument("--conv-channels", default="32,64", help="Comma-separated convolution channel sizes (e.g., 32,64,128)")
+    parser.add_argument("--hidden-size", type=int, default=128, help="Hidden size for LSTM layers")
+    parser.add_argument("--lstm-layers", type=int, default=2, help="Number of LSTM layers")
+    parser.add_argument("--no-bidirectional", action="store_true", help="Disable bidirectional LSTM")
+    parser.add_argument("--dropout", type=float, default=0.25, help="Dropout probability applied after LSTM")
     parser.add_argument("--log-batches", type=int, default=0, help="Log every N training batches (set 0 to disable)")
     parser.add_argument("--progress", action="store_true", help="Display tqdm progress bars during training")
     parser.add_argument("--log-dir", default=None, help="Optional TensorBoard log directory")
@@ -72,26 +68,30 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def build_dataloaders(args: argparse.Namespace) -> Tuple[DataLoader, DataLoader, List[str], Optional[SymptomSpeechDataset]]:
+def build_dataloaders(
+    args: argparse.Namespace,
+) -> Tuple[DataLoader, DataLoader, List[str], Optional[SymptomSpeechDataset]]:
     val_manifest = Path(args.data_dir) / "val.json"
-    weighted_sampler = None
+
+    weighted_sampler: Optional[WeightedRandomSampler] = None
     train_manifest_dataset: Optional[SymptomSpeechDataset] = None
 
     if val_manifest.exists():
         train_dataset = SymptomSpeechDataset(
             root=args.data_dir,
             split="train",
-            sample_rate=args.sample_rate,
-            max_duration=args.max_duration,
+            pad_to=args.pad_to,
             augment=args.augment,
             augment_prob=args.augment_prob,
+            n_mfcc=args.n_mfcc,
         )
         val_dataset = SymptomSpeechDataset(
             root=args.data_dir,
             split="val",
-            sample_rate=args.sample_rate,
-            max_duration=args.max_duration,
+            pad_to=args.pad_to,
+            label_to_index=train_dataset.label_to_index,
             augment=False,
+            n_mfcc=args.n_mfcc,
         )
         train_manifest_dataset = train_dataset
 
@@ -102,18 +102,17 @@ def build_dataloaders(args: argparse.Namespace) -> Tuple[DataLoader, DataLoader,
         base_dataset = SymptomSpeechDataset(
             root=args.data_dir,
             split="train",
-            sample_rate=args.sample_rate,
-            max_duration=args.max_duration,
-            augment=args.augment,
-            augment_prob=args.augment_prob,
+            pad_to=args.pad_to,
+            augment=False,
+            n_mfcc=args.n_mfcc,
         )
         val_len = max(1, int(len(base_dataset) * args.val_split))
         train_len = len(base_dataset) - val_len
         train_dataset, val_dataset = random_split(base_dataset, [train_len, val_len])
 
     if isinstance(train_dataset, Subset):
-        base = train_dataset.dataset  # type: ignore[attr-defined]
-        class_names = base.class_names  # type: ignore[has-type]
+        base_dataset = train_dataset.dataset  # type: ignore[attr-defined]
+        class_names = base_dataset.class_names  # type: ignore[has-type]
     else:
         class_names = train_dataset.class_names
 
@@ -136,39 +135,38 @@ def build_dataloaders(args: argparse.Namespace) -> Tuple[DataLoader, DataLoader,
     return train_loader, val_loader, class_names, train_manifest_dataset
 
 
-def lengths_to_device(lengths, device: torch.device) -> torch.Tensor:
-    if not isinstance(lengths, torch.Tensor):
-        lengths = torch.tensor(lengths, dtype=torch.long)
-    else:
-        lengths = lengths.to(dtype=torch.long)
-    return lengths.to(device)
-
-
 def train() -> None:
     args = parse_args()
+    args.conv_channels = _parse_conv_channels(args.conv_channels)
     log = logger.get_logger(__name__)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     log.info("Using device", device=str(device))
 
+    if args.progress and tqdm is None:
+        log.warning("tqdm is not installed; install tqdm or omit --progress to disable progress bars")
+
     train_loader, val_loader, class_names, train_manifest_dataset = build_dataloaders(args)
     num_classes = len(class_names)
 
-    max_length_samples = int(args.sample_rate * args.max_duration)
+    arch = {
+        "conv_channels": tuple(args.conv_channels),
+        "lstm_hidden": args.hidden_size,
+        "lstm_layers": args.lstm_layers,
+        "bidirectional": not args.no_bidirectional,
+        "dropout": args.dropout,
+        "n_mfcc": args.n_mfcc,
+    }
 
-    model = AudioTransformerClassifier(
+    model = AudioClassifier(
         device=device,
         num_classes=num_classes,
         class_names=class_names,
-        sample_rate=args.sample_rate,
-        max_length=max_length_samples,
-        n_mels=args.n_mels,
-        n_fft=args.n_fft,
-        hop_length=args.hop_length,
-        embed_dim=args.embed_dim,
-        num_heads=args.num_heads,
-        num_layers=args.num_layers,
-        ffn_dim=args.ffn_dim,
+        conv_channels=arch["conv_channels"],
+        lstm_hidden=args.hidden_size,
+        lstm_layers=args.lstm_layers,
+        bidirectional=not args.no_bidirectional,
         dropout=args.dropout,
+        n_mfcc=args.n_mfcc,
     )
 
     class_weights_tensor = None
@@ -179,10 +177,10 @@ def train() -> None:
         class_weights_tensor = torch.tensor(weights, dtype=torch.float32, device=device)
 
     criterion = torch.nn.CrossEntropyLoss(weight=class_weights_tensor)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, betas=(0.9, 0.98))
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.5, patience=3)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.5, patience=2)
 
-    writer: Optional[SummaryWriter] = None
+    writer: SummaryWriter | None = None
     if args.log_dir and SummaryWriter is not None:
         writer = SummaryWriter(args.log_dir)
 
@@ -199,20 +197,18 @@ def train() -> None:
         else:
             batch_iterator = train_loader
 
-        for batch_idx, batch in enumerate(batch_iterator, 1):
-            waveforms, lengths, labels = batch
-            waveforms = waveforms.float()
-            lengths = lengths_to_device(lengths, device)
-            labels = labels.to(device)
+        for batch_idx, (features, labels) in enumerate(batch_iterator, 1):
+            features = features.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
 
             optimizer.zero_grad()
-            logits = model(waveforms, lengths)
+            logits = model(features)
             loss = criterion(logits, labels)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
             optimizer.step()
 
-            running_loss += loss.item() * waveforms.size(0)
+            running_loss += loss.item() * features.size(0)
 
             if args.progress and tqdm is not None:
                 batch_iterator.set_postfix(loss=float(loss.item()))
@@ -226,8 +222,12 @@ def train() -> None:
                     loss=round(float(loss.item()), 4),
                 )
 
+        if args.progress and tqdm is not None:
+            batch_iterator.set_description(f"Epoch {epoch}/{args.epochs} (done)")
+            batch_iterator.close()
+
         train_loss = running_loss / len(train_loader.dataset)
-        val_loss, metrics = evaluate(model, val_loader, criterion, device)
+        val_loss, metrics = evaluate(model, val_loader, criterion, device, class_names)
         val_acc = metrics["accuracy"]
         macro_f1 = metrics["macro_f1"]
         scheduler.step(val_loss)
@@ -254,11 +254,18 @@ def train() -> None:
                 {
                     "state_dict": model.state_dict(),
                     "class_names": class_names,
-                    "architecture": model.arch,
+                    "pad_to": args.pad_to,
+                    "metrics": metrics,
+                    "arch": arch,
                 },
                 output_path,
             )
-            log.info("Saved new best audio checkpoint", path=str(output_path), accuracy=round(val_acc, 4), macro_f1=round(macro_f1, 4))
+            log.info(
+                "Saved new best audio checkpoint",
+                path=str(output_path),
+                accuracy=round(val_acc, 4),
+                macro_f1=round(macro_f1, 4),
+            )
 
     if writer:
         writer.close()
@@ -278,10 +285,11 @@ def train() -> None:
 
 @torch.no_grad()
 def evaluate(
-    model: AudioTransformerClassifier,
+    model: AudioClassifier,
     loader: DataLoader,
     criterion,
     device: torch.device,
+    class_names: List[str],
 ) -> Tuple[float, Dict[str, object]]:
     model.eval()
     total_loss = 0.0
@@ -290,18 +298,16 @@ def evaluate(
     all_preds: List[int] = []
     all_labels: List[int] = []
 
-    for waveforms, lengths, labels in loader:
-        waveforms = waveforms.float()
-        lengths = lengths_to_device(lengths, device)
-        labels = labels.to(device)
-
-        logits = model(waveforms, lengths)
+    for features, labels in loader:
+        features = features.to(device, non_blocking=True)
+        labels = labels.to(device, non_blocking=True)
+        logits = model(features)
         loss = criterion(logits, labels)
 
-        total_loss += loss.item() * waveforms.size(0)
+        total_loss += loss.item() * features.size(0)
         preds = logits.argmax(dim=1)
         total_correct += (preds == labels).sum().item()
-        total_samples += waveforms.size(0)
+        total_samples += features.size(0)
         all_preds.extend(preds.cpu().tolist())
         all_labels.extend(labels.cpu().tolist())
 
@@ -319,9 +325,7 @@ def evaluate(
         labels_arr = np.array(all_labels)
         per_class: Dict[str, Dict[str, float]] = {}
         f1_total = 0.0
-        unique_labels = np.unique(labels_arr)
-        class_lookup = getattr(model, "class_names", None)
-        for idx in unique_labels:
+        for idx, name in enumerate(class_names):
             tp = float(np.sum((preds_arr == idx) & (labels_arr == idx)))
             fp = float(np.sum((preds_arr == idx) & (labels_arr != idx)))
             fn = float(np.sum((preds_arr != idx) & (labels_arr == idx)))
@@ -329,8 +333,7 @@ def evaluate(
             recall = tp / (tp + fn) if (tp + fn) else 0.0
             f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) else 0.0
             support = int(np.sum(labels_arr == idx))
-            label_name = class_lookup[idx] if class_lookup and idx < len(class_lookup) else str(idx)
-            per_class[label_name] = {
+            per_class[name] = {
                 "precision": float(precision),
                 "recall": float(recall),
                 "f1": float(f1),
@@ -338,7 +341,7 @@ def evaluate(
             }
             f1_total += f1
         metrics["per_class"] = per_class
-        metrics["macro_f1"] = float(f1_total / max(len(unique_labels), 1))
+        metrics["macro_f1"] = float(f1_total / max(len(class_names), 1))
 
     return avg_loss, metrics
 

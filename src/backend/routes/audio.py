@@ -11,9 +11,14 @@ async def classify_audio(file: UploadFile = File(...)) -> dict:
     """Transcribe speech input and return predicted symptom class."""
     audio_bytes = await file.read()
     audio_model = models.get_audio_model()
-    pad_to = getattr(audio_model, "pad_to", None)
-    features = preprocess.transform_audio_bytes(audio_bytes, pad_to=pad_to)
-    probs = audio_model.predict(features)
+    sample_rate = getattr(audio_model, "sample_rate", 16000)
+    max_length = getattr(audio_model, "max_length", None)
+    waveforms, lengths = preprocess.transform_audio_bytes(
+        audio_bytes,
+        sample_rate=sample_rate,
+        max_length=max_length,
+    )
+    probs = audio_model.predict(waveforms, lengths)
     transcript = models.get_transcriber().transcribe(audio_bytes)
     return {
         "transcript": transcript,

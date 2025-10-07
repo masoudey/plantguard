@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Protocol
 
 import torch
 from transformers import AutoModelForQuestionAnswering, AutoTokenizer
@@ -72,3 +72,17 @@ def answer_question(question: str, context: str) -> Dict[str, float | str | int 
         "start": int(start_char),
         "end": int(end_char),
     }
+
+
+class QAPipelineProtocol(Protocol):
+    def __call__(self, *, question: str, context: str) -> Dict[str, float | str | int | None]: ...
+
+
+@lru_cache(maxsize=1)
+def get_qa_pipeline() -> QAPipelineProtocol:
+    """Return a callable compatible with the legacy HF pipeline interface."""
+
+    def _run(*, question: str, context: str) -> Dict[str, float | str | int | None]:
+        return answer_question(question, context)
+
+    return _run

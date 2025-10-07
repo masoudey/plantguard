@@ -45,19 +45,35 @@ def get_vision_model() -> VisionClassifier:
 @lru_cache(maxsize=1)
 def get_audio_model() -> AudioClassifier:
     model_dir = _ensure_model_dir()
-    checkpoint = model_dir / "audio/plantguard_cnn_lstm.pt"
+    checkpoint = model_dir / "audio/plantguard_transformer.pt"
     class_names = None
     num_classes = 4
+    arch: dict[str, object] = {}
     if checkpoint.exists():
         state = torch.load(checkpoint, map_location="cpu")
         class_names = state.get("class_names")
         if class_names:
             num_classes = len(class_names)
+        else:
+            classifier_weight = state.get("state_dict", {}).get("classifier.1.weight")
+            if classifier_weight is not None:
+                num_classes = classifier_weight.shape[0]
+        arch = state.get("architecture", {})
     return AudioClassifier(
         device=get_device(),
         num_classes=num_classes,
         class_names=class_names,
         checkpoint=checkpoint if checkpoint.exists() else None,
+        sample_rate=int(arch.get("sample_rate", 16000)),
+        max_length=int(arch.get("max_length", 96000)),
+        n_mels=int(arch.get("n_mels", 64)),
+        n_fft=int(arch.get("n_fft", 1024)),
+        hop_length=int(arch.get("hop_length", 256)),
+        embed_dim=int(arch.get("embed_dim", 256)),
+        num_heads=int(arch.get("num_heads", 4)),
+        num_layers=int(arch.get("num_layers", 4)),
+        ffn_dim=int(arch.get("ffn_dim", 512)),
+        dropout=float(arch.get("dropout", 0.2)),
     )
 
 

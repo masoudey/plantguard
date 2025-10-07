@@ -1,90 +1,90 @@
 {
-  "accuracy": 0.14285714285714285,
-  "macro_f1": 0.07142857142857142,
+  "accuracy": 0.42857142857142855,
+  "macro_f1": 0.4316262868783877,
   "per_class": {
     "aphids": {
-      "precision": 0.5,
-      "recall": 1.0,
-      "f1": 0.6666666666666666,
-      "support": 1
+      "precision": 0.4,
+      "recall": 0.5,
+      "f1": 0.4444444444444445,
+      "support": 12
     },
     "bacterial_blight": {
-      "precision": 0.0,
-      "recall": 0.0,
-      "f1": 0.0,
-      "support": 1
+      "precision": 0.6,
+      "recall": 0.25,
+      "f1": 0.35294117647058826,
+      "support": 12
     },
     "bacterial_wilt": {
-      "precision": 0.0,
-      "recall": 0.0,
-      "f1": 0.0,
-      "support": 1
+      "precision": 0.2,
+      "recall": 0.25,
+      "f1": 0.22222222222222224,
+      "support": 12
     },
     "downy_mildew": {
-      "precision": 0.0,
-      "recall": 0.0,
-      "f1": 0.0,
-      "support": 1
+      "precision": 0.21428571428571427,
+      "recall": 0.25,
+      "f1": 0.23076923076923075,
+      "support": 12
     },
     "drought_stress": {
-      "precision": 0.0,
-      "recall": 0.0,
-      "f1": 0.0,
-      "support": 1
+      "precision": 0.5,
+      "recall": 0.16666666666666666,
+      "f1": 0.25,
+      "support": 12
     },
     "late_blight": {
-      "precision": 0.0,
-      "recall": 0.0,
-      "f1": 0.0,
-      "support": 1
+      "precision": 0.5,
+      "recall": 0.3333333333333333,
+      "f1": 0.4,
+      "support": 12
     },
     "leaf_spot": {
-      "precision": 0.0,
-      "recall": 0.0,
-      "f1": 0.0,
-      "support": 1
+      "precision": 0.5714285714285714,
+      "recall": 0.6666666666666666,
+      "f1": 0.6153846153846153,
+      "support": 12
     },
     "mosaic_virus": {
-      "precision": 0.0,
-      "recall": 0.0,
-      "f1": 0.0,
-      "support": 1
+      "precision": 0.6666666666666666,
+      "recall": 0.3333333333333333,
+      "f1": 0.4444444444444444,
+      "support": 12
     },
     "nitrogen_deficiency": {
-      "precision": 0.0,
-      "recall": 0.0,
-      "f1": 0.0,
-      "support": 1
+      "precision": 0.6428571428571429,
+      "recall": 0.75,
+      "f1": 0.6923076923076924,
+      "support": 12
     },
     "potassium_deficiency": {
-      "precision": 0.0,
-      "recall": 0.0,
-      "f1": 0.0,
-      "support": 1
+      "precision": 0.8333333333333334,
+      "recall": 0.4166666666666667,
+      "f1": 0.5555555555555556,
+      "support": 12
     },
     "powdery_mildew": {
-      "precision": 0.0,
-      "recall": 0.0,
-      "f1": 0.0,
-      "support": 1
+      "precision": 0.7777777777777778,
+      "recall": 0.5833333333333334,
+      "f1": 0.6666666666666666,
+      "support": 12
     },
     "spider_mites": {
-      "precision": 0.0,
-      "recall": 0.0,
-      "f1": 0.0,
-      "support": 1
+      "precision": 0.42857142857142855,
+      "recall": 0.5,
+      "f1": 0.4615384615384615,
+      "support": 12
     },
     "thrips": {
-      "precision": 0.0,
-      "recall": 0.0,
-      "f1": 0.0,
-      "support": 1
+      "precision": 0.2857142857142857,
+      "recall": 0.5,
+      "f1": 0.36363636363636365,
+      "support": 12
     },
     "tylcv": {
-      "precision": 0.2,
-      "recall": 1.0,
-      "f1": 0.33333333333333337,
-      "support": 1
+      "precision": 0.2608695652173913,
+      "recall": 0.5,
+      "f1": 0.3428571428571428,
+      "support": 12
     }
   }
 }

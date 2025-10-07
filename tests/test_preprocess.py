@@ -23,6 +23,7 @@ def test_transform_audio_bytes(tmp_path):
     waveform = np.zeros(16000, dtype=np.float32)
     path = tmp_path / "audio.wav"
     sf.write(path, waveform, samplerate=16000)
-    tensor = preprocess.transform_audio_bytes(path.read_bytes())
-    assert tensor.ndim == 4
-    assert tensor.dtype == torch.float32
+    waveforms, lengths = preprocess.transform_audio_bytes(path.read_bytes())
+    assert waveforms.ndim == 2
+    assert waveforms.dtype == torch.float32
+    assert lengths.shape == (1,)

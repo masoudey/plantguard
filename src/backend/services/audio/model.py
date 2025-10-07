@@ -1,117 +1,148 @@
-"""CNN-LSTM audio classifier."""
+"""Transformer-based audio classifier."""
 from __future__ import annotations
 
+import math
 from pathlib import Path
-from typing import Dict, Sequence
+from typing import Dict, Optional
 
 import numpy as np
 import torch
 import torch.nn as nn
+import torchaudio
 
 
-class AudioClassifier(nn.Module):
-    """Speech classifier with configurable convolutional front-end and LSTM head."""
+class PositionalEncoding(nn.Module):
+    def __init__(self, d_model: int, max_len: int, dropout: float, batch_first: bool = True) -> None:
+        super().__init__()
+        self.dropout = nn.Dropout(dropout)
+        self.batch_first = batch_first
 
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        if batch_first:
+            pe = pe.unsqueeze(0)  # (1, max_len, d_model)
+        else:
+            pe = pe.unsqueeze(1)  # (max_len, 1, d_model)
+        self.register_buffer("pe", pe)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.batch_first:
+            return self.dropout(x + self.pe[:, : x.size(1)])
+        return self.dropout(x + self.pe[: x.size(0)])
+
+
+class AudioTransformerClassifier(nn.Module):
     def __init__(
         self,
         device: torch.device,
         num_classes: int,
-        class_names: list[str] | None = None,
-        checkpoint: Path | None = None,
+        class_names: Optional[list[str]] = None,
+        checkpoint: Optional[Path] = None,
         *,
-        conv_channels: Sequence[int] | None = None,
-        lstm_hidden: int = 128,
-        lstm_layers: int = 2,
-        bidirectional: bool = True,
-        dropout: float = 0.3,
-        n_mfcc: int = 40,
+        sample_rate: int = 16000,
+        max_length: int = 96000,
+        n_mels: int = 64,
+        n_fft: int = 1024,
+        hop_length: int = 256,
+        embed_dim: int = 256,
+        num_heads: int = 4,
+        num_layers: int = 4,
+        ffn_dim: int = 512,
+        dropout: float = 0.2,
     ) -> None:
         super().__init__()
         self.device = device
         self.class_names = class_names or [f"class_{idx}" for idx in range(num_classes)]
+        self.sample_rate = sample_rate
+        self.max_length = max_length
+        self.hop_length = hop_length
+        self.n_mels = n_mels
 
-        arch_config: Dict[str, object] = {
-            "conv_channels": tuple(conv_channels or (32, 64)),
-            "lstm_hidden": lstm_hidden,
-            "lstm_layers": lstm_layers,
-            "bidirectional": bidirectional,
+        self.melspec = torchaudio.transforms.MelSpectrogram(
+            sample_rate=sample_rate,
+            n_fft=n_fft,
+            hop_length=hop_length,
+            n_mels=n_mels,
+            center=True,
+            power=2.0,
+            normalized=False,
+        )
+        self.db_transform = torchaudio.transforms.AmplitudeToDB(top_db=80.0)
+        self.proj = nn.Conv1d(n_mels, embed_dim, kernel_size=1)
+
+        max_frames = math.ceil(max_length / hop_length) + 4
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=embed_dim,
+            nhead=num_heads,
+            dim_feedforward=ffn_dim,
+            dropout=dropout,
+            batch_first=True,
+        )
+        self.positional = PositionalEncoding(embed_dim, max_frames, dropout, batch_first=True)
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+
+        self.norm = nn.LayerNorm(embed_dim)
+        self.classifier = nn.Sequential(
+            nn.Dropout(dropout),
+            nn.Linear(embed_dim, num_classes),
+        )
+
+        self.arch: Dict[str, object] = {
+            "sample_rate": sample_rate,
+            "max_length": max_length,
+            "n_mels": n_mels,
+            "n_fft": n_fft,
+            "hop_length": hop_length,
+            "embed_dim": embed_dim,
+            "num_heads": num_heads,
+            "num_layers": num_layers,
+            "ffn_dim": ffn_dim,
             "dropout": dropout,
-            "n_mfcc": n_mfcc,
         }
 
-        state = None
         if checkpoint and checkpoint.exists():
             state = torch.load(checkpoint, map_location=device)
-            arch_config.update(state.get("arch", {}))
+            state_dict = state.get("state_dict", state)
             checkpoint_classes = state.get("class_names")
             if checkpoint_classes:
                 self.class_names = list(checkpoint_classes)
-                num_classes = len(self.class_names)
-            self.pad_to = state.get("pad_to")
-        else:
-            self.pad_to: int | None = None
-
-        self._build_layers(num_classes, arch_config)
+            self.load_state_dict(state_dict, strict=False)
         self.to(self.device)
 
-        if state is not None:
-            state_dict = state.get("state_dict", state)
-            self.load_state_dict(state_dict, strict=False)
-        self.eval()
+    def forward(self, waveforms: torch.Tensor, lengths: torch.Tensor) -> torch.Tensor:
+        waveforms = waveforms.to(self.device)
+        lengths = lengths.to(self.device)
 
-    def _build_layers(self, num_classes: int, arch: Dict[str, object]) -> None:
-        self.conv_channels = tuple(arch.get("conv_channels", (32, 64)))
-        self.lstm_hidden = int(arch.get("lstm_hidden", 128))
-        self.lstm_layers = int(arch.get("lstm_layers", 2))
-        self.bidirectional = bool(arch.get("bidirectional", True))
-        self.dropout_rate = float(arch.get("dropout", 0.3))
-        self.n_mfcc = int(arch.get("n_mfcc", 40))
+        spec = self.melspec(waveforms)
+        spec = self.db_transform(spec.clamp(min=1e-10))
+        spec = (spec - spec.mean(dim=(-2, -1), keepdim=True)) / (spec.std(dim=(-2, -1), keepdim=True) + 1e-5)
+        emb = self.proj(spec).transpose(1, 2)  # (batch, time, embed)
+        emb = self.positional(emb)
 
-        layers: list[nn.Module] = []
-        in_channels = 1
-        for out_channels in self.conv_channels:
-            layers.extend(
-                [
-                    nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
-                    nn.BatchNorm2d(out_channels),
-                    nn.ReLU(),
-                    nn.MaxPool2d(kernel_size=(1, 2)),
-                ]
-            )
-            in_channels = out_channels
-        self.conv = nn.Sequential(*layers)
+        frame_lengths = ((lengths + self.hop_length - 1) // self.hop_length).clamp(min=1)
+        max_frames = emb.size(1)
+        mask = torch.arange(max_frames, device=self.device).expand(len(frame_lengths), max_frames) >= frame_lengths.unsqueeze(1)
 
-        lstm_input = self.conv_channels[-1] * self.n_mfcc
-        self.lstm = nn.LSTM(
-            lstm_input,
-            self.lstm_hidden,
-            num_layers=self.lstm_layers,
-            batch_first=True,
-            bidirectional=self.bidirectional,
-            dropout=self.dropout_rate if self.lstm_layers > 1 else 0.0,
-        )
-
-        classifier_in = self.lstm_hidden * (2 if self.bidirectional else 1)
-        classifier_layers: list[nn.Module] = [nn.Linear(classifier_in, self.lstm_hidden), nn.ReLU()]
-        if self.dropout_rate > 0:
-            classifier_layers.append(nn.Dropout(self.dropout_rate))
-        classifier_layers.append(nn.Linear(self.lstm_hidden, num_classes))
-        self.classifier = nn.Sequential(*classifier_layers)
-        self.post_lstm_dropout = nn.Dropout(self.dropout_rate) if self.dropout_rate > 0 else nn.Identity()
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x.to(self.device)
-        x = self.conv(x)
-        x = x.permute(0, 3, 1, 2).contiguous()
-        b, t, c, h = x.shape
-        x = x.view(b, t, c * h)
-        outputs, _ = self.lstm(x)
-        last_hidden = outputs[:, -1]
-        last_hidden = self.post_lstm_dropout(last_hidden)
-        logits = self.classifier(last_hidden)
+        encoded = self.transformer(emb, src_key_padding_mask=mask)
+        mask_invert = (~mask).unsqueeze(-1).float()
+        pooled = (encoded * mask_invert).sum(dim=1) / mask_invert.sum(dim=1).clamp(min=1e-6)
+        pooled = self.norm(pooled)
+        logits = self.classifier(pooled)
         return logits
 
-    def predict(self, features: torch.Tensor) -> np.ndarray:
+    def predict(self, waveforms: torch.Tensor, lengths: torch.Tensor) -> np.ndarray:
+        """Convenience helper that mirrors the legacy interface."""
+        self.eval()
         with torch.no_grad():
-            logits = self.forward(features)
-            return logits.squeeze(0).cpu().numpy()
+            logits = self.forward(waveforms, lengths)
+        return logits.squeeze(0).cpu().numpy()
+
+
+# Backward-compatible alias used across the codebase.
+AudioClassifier = AudioTransformerClassifier
+
+
+__all__ = ["AudioTransformerClassifier", "AudioClassifier"]

@@ -70,13 +70,21 @@ def parse_args() -> argparse.Namespace:
 
 def load_feature_pack(path: Path) -> FeaturePack:
     payload = torch.load(path)
-    image = torch.tensor(payload["image"]).float()
-    text = torch.tensor(payload["text"]).float()
+    image = _ensure_tensor(payload["image"], dtype=torch.float32)
+    text = _ensure_tensor(payload["text"], dtype=torch.float32)
     audio = payload.get("audio")
-    audio_tensor = torch.tensor(audio).float() if audio is not None else None
-    labels = torch.tensor(payload["labels"]).long()
+    audio_tensor = _ensure_tensor(audio, dtype=torch.float32) if audio is not None else None
+    labels = _ensure_tensor(payload["labels"], dtype=torch.long)
     class_names = payload.get("class_names") or [f"class_{i}" for i in range(labels.max().item() + 1)]
     return FeaturePack(image=image, text=text, audio=audio_tensor, labels=labels, class_names=class_names)
+
+
+def _ensure_tensor(value, *, dtype: torch.dtype) -> torch.Tensor:
+    if isinstance(value, torch.Tensor):
+        tensor = value.detach().clone()
+    else:
+        tensor = torch.as_tensor(value)
+    return tensor.to(dtype)
 
 
 def train() -> None:
@@ -88,13 +96,15 @@ def train() -> None:
     train_pack = load_feature_pack(Path(args.train))
     val_pack = load_feature_pack(Path(args.val))
 
+    pin_memory = device.type == "cuda"
+
     train_loader = DataLoader(
         FusionTensorDataset(train_pack),
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.num_workers,
         collate_fn=collate_batch,
-        pin_memory=True,
+        pin_memory=pin_memory,
     )
     val_loader = DataLoader(
         FusionTensorDataset(val_pack),
@@ -102,7 +112,7 @@ def train() -> None:
         shuffle=False,
         num_workers=args.num_workers,
         collate_fn=collate_batch,
-        pin_memory=True,
+        pin_memory=pin_memory,
     )
 
     image_dim = train_pack.image.shape[1]

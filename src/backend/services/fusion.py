@@ -41,10 +41,17 @@ def run_fusion(image_bytes: bytes, audio_bytes: bytes | None, question: str | No
     transcript = None
     audio_predictions = None
     if audio_bytes and audio_model is not None:
-        pad_to = getattr(audio_model, "pad_to", None)
-        features = preprocess.transform_audio_bytes(audio_bytes, pad_to=pad_to).to(device)
+        sample_rate = getattr(audio_model, "sample_rate", 16000)
+        max_length = getattr(audio_model, "max_length", None)
+        waveforms, lengths = preprocess.transform_audio_bytes(
+            audio_bytes,
+            sample_rate=sample_rate,
+            max_length=max_length,
+        )
+        waveforms = waveforms.to(device)
+        lengths = lengths.to(device)
         with torch.no_grad():
-            audio_logits = audio_model(features)
+            audio_logits = audio_model(waveforms, lengths)
         audio_predictions = models.format_predictions(
             audio_logits.squeeze(0), labels=audio_model.class_names
         )

@@ -4,7 +4,6 @@ from __future__ import annotations
 import io
 from typing import Optional
 
-import numpy as np
 import torch
 from PIL import Image
 from torchvision import transforms
@@ -28,13 +27,20 @@ def transform_image_bytes(image_bytes: bytes) -> torch.Tensor:
     return tensor
 
 
-def transform_audio_bytes(audio_bytes: bytes, pad_to: int | None = None) -> torch.Tensor:
-    """Convert raw WAV/MP3 bytes into MFCC features tensor."""
-    features = audio_features.mfcc_from_bytes(audio_bytes)
-    if pad_to is not None:
-        features = audio_features.pad_features(features, max_length=pad_to)
-    tensor = torch.from_numpy(features).unsqueeze(0).unsqueeze(0)
-    return tensor.float()
+def transform_audio_bytes(
+    audio_bytes: bytes,
+    *,
+    sample_rate: int = 16000,
+    max_length: int | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Convert raw audio bytes into padded waveform tensor and lengths."""
+    waveform, _ = audio_features.load_waveform_from_bytes(audio_bytes, target_sr=sample_rate)
+    original_length = waveform.numel()
+    if max_length is not None:
+        waveform, original_length = audio_features.pad_or_trim_waveform(waveform, max_length)
+    waveforms = waveform.unsqueeze(0)
+    lengths = torch.tensor([original_length], dtype=torch.long)
+    return waveforms.float(), lengths
 
 
 def transform_text(question: str, context: Optional[str] = None) -> dict:
