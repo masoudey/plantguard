@@ -9,7 +9,7 @@ import torch
 from transformers import AutoModelForQuestionAnswering, AutoTokenizer
 
 MODEL_DIR = Path("models/text/plantguard_qa_head")
-BASE_MODEL = "distilbert-base-uncased-distilled-squad"
+BASE_MODEL = "base-uncased-distilled-squad"
 
 
 @lru_cache(maxsize=1)

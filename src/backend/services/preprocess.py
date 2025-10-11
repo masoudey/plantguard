@@ -32,9 +32,16 @@ def transform_audio_bytes(
     *,
     sample_rate: int = 16000,
     max_length: int | None = None,
+    filename: str | None = None,
+    content_type: str | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Convert raw audio bytes into padded waveform tensor and lengths."""
-    waveform, _ = audio_features.load_waveform_from_bytes(audio_bytes, target_sr=sample_rate)
+    waveform, _ = audio_features.load_waveform_from_bytes(
+        audio_bytes,
+        target_sr=sample_rate,
+        filename=filename,
+        content_type=content_type,
+    )
     original_length = waveform.numel()
     if max_length is not None:
         waveform, original_length = audio_features.pad_or_trim_waveform(waveform, max_length)

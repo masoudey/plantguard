@@ -17,6 +17,8 @@ async def classify_audio(file: UploadFile = File(...)) -> dict:
         audio_bytes,
         sample_rate=sample_rate,
         max_length=max_length,
+        filename=file.filename,
+        content_type=file.content_type,
     )
     probs = audio_model.predict(waveforms, lengths)
     transcript = models.get_transcriber().transcribe(audio_bytes)

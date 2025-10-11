@@ -54,6 +54,61 @@ export function ResultsPanel({ response }) {
         </section>
       ) : null}
 
+      {response.audio?.top_k?.length ? (
+        <section className="space-y-3">
+          <h3 className="text-lg font-semibold text-slate-900">Audio Model</h3>
+          <ul className="space-y-2">
+            {response.audio.top_k.map((item) => (
+              <li
+                key={item.label}
+                className="flex items-center justify-between rounded-lg border border-slate-100 bg-slate-50 px-4 py-3 text-sm"
+              >
+                <span className="font-medium text-slate-800">{item.label}</span>
+                <span className="inline-flex items-center rounded-full bg-emerald-100 px-3 py-1 text-xs font-semibold text-emerald-700">
+                  {formatConfidence(item.confidence)}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
+      {response.text?.top_k?.length ? (
+        <section className="space-y-3">
+          <h3 className="text-lg font-semibold text-slate-900">Text Model</h3>
+          <ul className="space-y-2">
+            {response.text.top_k.map((item) => (
+              <li
+                key={`${item.label}-${item.score ?? item.confidence}`}
+                className="rounded-lg border border-slate-100 bg-slate-50 px-4 py-3 text-sm"
+              >
+                <div className="flex items-center justify-between">
+                  <div className="flex flex-col">
+                    <span className="font-medium text-slate-800">{item.label ?? "context"}</span>
+                    {item.weight !== undefined && item.weight !== null ? (
+                      <span className="text-xs text-slate-500">
+                        retrieval weight: {formatConfidence(item.weight)}
+                      </span>
+                    ) : null}
+                  </div>
+                  <span className="inline-flex items-center rounded-full bg-emerald-100 px-3 py-1 text-xs font-semibold text-emerald-700">
+                    {formatConfidence(item.confidence ?? 0)}
+                  </span>
+                </div>
+                {item.answer ? (
+                  <p className="mt-2 text-sm font-medium text-slate-700">Answer: {item.answer}</p>
+                ) : null}
+                {(item.context || item.text) ? (
+                  <p className="mt-2 text-xs text-slate-600 whitespace-pre-wrap max-h-32 overflow-hidden">
+                    {(item.context || item.text)?.toString()}
+                  </p>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
       {response.transcript ? (
         <section className="space-y-2">
           <h3 className="text-lg font-semibold text-slate-900">Transcribed Symptoms</h3>

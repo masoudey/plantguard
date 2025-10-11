@@ -19,5 +19,7 @@ async def run_multimodal_diagnosis(
         image_bytes=image_bytes,
         audio_bytes=audio_bytes,
         question=question,
+        audio_filename=audio.filename if audio else None,
+        audio_content_type=audio.content_type if audio else None,
     )
     return result

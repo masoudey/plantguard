@@ -2,7 +2,12 @@
 from __future__ import annotations
 
 import io
+import logging
+
 import speech_recognition as sr
+
+
+logger = logging.getLogger(__name__)
 
 
 class SpeechTranscriber:
@@ -10,11 +15,17 @@ class SpeechTranscriber:
         self.recognizer = sr.Recognizer()
 
     def transcribe(self, audio_bytes: bytes) -> str:
-        with sr.AudioFile(io.BytesIO(audio_bytes)) as source:
-            audio = self.recognizer.record(source)
+        try:
+            with sr.AudioFile(io.BytesIO(audio_bytes)) as source:
+                audio = self.recognizer.record(source)
+        except Exception as exc:  # pragma: no cover - defensive catch
+            logger.warning("Speech transcription failed to read audio: %s", exc)
+            return ""
+
         try:
             return self.recognizer.recognize_google(audio)
         except sr.UnknownValueError:
             return ""
-        except sr.RequestError:
+        except (sr.RequestError, OSError) as exc:
+            logger.warning("Speech transcription failed: %s", exc)
             return ""

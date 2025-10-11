@@ -22,30 +22,37 @@ class MultimodalFusionHead(nn.Module):
     ) -> None:
         super().__init__()
         self.device = device
-        self.image_dim = image_dim
-        self.text_dim = text_dim
-        self.audio_dim = audio_dim
-        self.num_classes = num_classes
-        self.class_names: List[str] = list(class_names) if class_names else [f"class_{i}" for i in range(num_classes)]
+        metadata: dict[str, object] = {}
+        state_dict: dict[str, torch.Tensor] | None = None
+        if checkpoint and checkpoint.exists():
+            state = torch.load(checkpoint, map_location=device)
+            metadata = state.get("metadata", {})
+            raw_state = state.get("state_dict", state)
+            if isinstance(raw_state, dict):
+                state_dict = raw_state
 
-        fused_dim = image_dim + text_dim + (audio_dim or 0)
+        self.class_names: List[str] = list(class_names) if class_names else [f"class_{i}" for i in range(num_classes)]
+        self.image_dim = metadata.get("image_dim", image_dim)  # type: ignore[arg-type]
+        self.text_dim = metadata.get("text_dim", text_dim)  # type: ignore[arg-type]
+        self.audio_dim = metadata.get("audio_dim", audio_dim)  # type: ignore[arg-type]
+        self.num_classes = metadata.get("num_classes", num_classes)  # type: ignore[arg-type]
+        if metadata.get("class_names"):
+            self.class_names = list(metadata["class_names"])  # type: ignore[index]
+
+        fused_dim = self.image_dim + self.text_dim + (self.audio_dim or 0)
         hidden_dim = max(128, fused_dim // 2)
         self.mlp = nn.Sequential(
             nn.Linear(fused_dim, hidden_dim),
             nn.ReLU(),
             nn.Dropout(0.3),
-            nn.Linear(hidden_dim, num_classes),
+            nn.Linear(hidden_dim, self.num_classes),
         ).to(device)
 
-        if checkpoint and checkpoint.exists():
-            state = torch.load(checkpoint, map_location=device)
-            metadata = state.get("metadata", {})
-            self.class_names = metadata.get("class_names", self.class_names)
-            self.image_dim = metadata.get("image_dim", self.image_dim)
-            self.text_dim = metadata.get("text_dim", self.text_dim)
-            self.audio_dim = metadata.get("audio_dim", self.audio_dim)
-            self.num_classes = metadata.get("num_classes", self.num_classes)
-            self.mlp.load_state_dict(state.get("state_dict", state))
+        if state_dict:
+            if any(key.startswith("mlp.") for key in state_dict.keys()):
+                self.load_state_dict(state_dict, strict=False)
+            else:
+                self.mlp.load_state_dict(state_dict)  # type: ignore[arg-type]
 
         self.eval()
 

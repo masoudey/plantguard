@@ -2,8 +2,12 @@
 from __future__ import annotations
 
 import io
+import os
+import subprocess
+import tempfile
 from pathlib import Path
 from typing import Tuple
+import mimetypes
 
 import soundfile as sf
 import torch
@@ -22,12 +26,95 @@ def load_waveform(path: str | Path, target_sr: int) -> Tuple[torch.Tensor, int]:
     return waveform.contiguous(), sr
 
 
-def load_waveform_from_bytes(audio_bytes: bytes, target_sr: int) -> Tuple[torch.Tensor, int]:
-    """Load an audio file from in-memory bytes and resample if needed."""
-    waveform, sr = sf.read(io.BytesIO(audio_bytes), dtype="float32")
-    waveform = torch.from_numpy(waveform)
+def _resolve_suffix(filename: str | None, content_type: str | None) -> str:
+    if filename:
+        ext = Path(filename).suffix
+        if ext:
+            return ext
+    if content_type:
+        ext = mimetypes.guess_extension(content_type, strict=False)
+        if ext:
+            return ext
+    return ".tmp"
+
+
+def _decode_with_ffmpeg(audio_bytes: bytes, target_sr: int) -> Tuple[torch.Tensor, int]:
+    """Decode arbitrary audio bytes using ffmpeg CLI to ensure broad format support."""
+    command = [
+        "ffmpeg",
+        "-nostdin",
+        "-threads",
+        "1",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        "pipe:0",
+        "-f",
+        "wav",
+        "-ac",
+        "1",
+        "-ar",
+        str(target_sr),
+        "pipe:1",
+    ]
+    result = subprocess.run(
+        command,
+        input=audio_bytes,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.decode("utf-8", errors="ignore"))
+    waveform_np, sr = sf.read(io.BytesIO(result.stdout), dtype="float32")
+    waveform = torch.from_numpy(waveform_np)
     if waveform.ndim == 2:
         waveform = waveform.mean(dim=1)
+    return waveform.contiguous(), sr
+
+
+def load_waveform_from_bytes(
+    audio_bytes: bytes,
+    target_sr: int,
+    *,
+    filename: str | None = None,
+    content_type: str | None = None,
+) -> Tuple[torch.Tensor, int]:
+    """Load an audio file from in-memory bytes and resample if needed."""
+    buffer = io.BytesIO(audio_bytes)
+    try:
+        waveform_np, sr = sf.read(buffer, dtype="float32")
+        waveform = torch.from_numpy(waveform_np)
+    except RuntimeError:
+        buffer.seek(0)
+        suffix = _resolve_suffix(filename, content_type)
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+            tmp.write(buffer.read())
+            tmp_path = tmp.name
+        try:
+            try:
+                waveform, sr = torchaudio.load(tmp_path)
+            except (RuntimeError, OSError, sf.LibsndfileError):
+                waveform, sr = _decode_with_ffmpeg(audio_bytes, target_sr)
+            else:
+                if waveform.ndim > 1:
+                    waveform = waveform.mean(dim=0)
+                else:
+                    waveform = waveform.squeeze(0)
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+    else:
+        if waveform.ndim == 2:
+            waveform = waveform.mean(dim=1)
+
+    waveform = waveform.contiguous()
+    if waveform.dtype != torch.float32:
+        waveform = waveform.to(torch.float32)
+
     if sr != target_sr:
         waveform = torchaudio.functional.resample(waveform.unsqueeze(0), sr, target_sr).squeeze(0)
         sr = target_sr

@@ -20,7 +20,11 @@ from src.backend.utils import logger
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Fine-tune a ResNet50 on plant disease images")
-    parser.add_argument("--data-dir", default="data/processed/plantvillage", help="Root directory containing train/val/test splits or a single dataset folder")
+    parser.add_argument(
+        "--data-dir",
+        default="data/vision",
+        help="Root directory containing PlantVillage data (directories of images or parquet files)",
+    )
     parser.add_argument("--output", default="models/vision/plantguard_resnet50.pt", help="Where to store the trained weights")
     parser.add_argument("--epochs", type=int, default=10, help="Number of training epochs")
     parser.add_argument("--batch-size", type=int, default=32, help="Mini-batch size")

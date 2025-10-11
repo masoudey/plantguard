@@ -17,5 +17,8 @@ venv/
 .envrc
 .cache/
 
+data/raw/
+data/processed/faq/*.json
+
 frontend/node_modules/
 frontend/dist/
